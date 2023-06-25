@@ -41,6 +41,8 @@ using json = nlohmann::json;
 #define JS_LORAWAN_WORK_MODE "work_mode"
 #define JS_LORAWAN_CONFIG    "config"
 
+static sem_t stop_sem;
+
 void tcp_loop_thread(void);
 
 double difftimespec(struct timespec end, struct timespec beginning)
@@ -140,8 +142,7 @@ static void sig_handler(int sigio)
         instance.set_thread_exit(true);
         instance.clean_all();
     }
-    usleep(300);
-    exit(0);
+    sem_post(&stop_sem);
 }
 
 ProtocolHandler ::ProtocolHandler(/* args */)
@@ -382,6 +383,7 @@ void ProtocolHandler::udp_client_loop_start(void)
         }
     }
     printf("[%s] thread exit.....\n", __func__);
+    sem_post(&stop_sem);
 }
 
 void ProtocolHandler::udp_server_loop_start(void)
@@ -727,6 +729,7 @@ void udp_check_onlie(void)
 
 int main(void)
 {
+    sem_init(&stop_sem, 0, 0);
     struct sigaction sigact; /* SIGQUIT&SIGINT&SIGTERM signal handling */
     /* configure signal handling */
     sigemptyset(&sigact.sa_mask);
@@ -741,8 +744,11 @@ int main(void)
 
     thread th1(udp_loop_thread);
     thread th2(tcp_loop_thread);
-    th1.join();
-    th2.join();
-
+    th1.detach();
+    th2.detach();
+    sem_wait(&stop_sem);
+    // th1.join();
+    // th2.join();
+    printf("exit program...\n");
     return 0;
 }
