@@ -26,7 +26,7 @@
 #define MAX_RECV_SIZE 1024
 #define EPOLLEVENTS   100
 #define FDSIZE        20
-#define UDP_TIME_OUT  3
+#define UDP_TIME_OUT  1
 #define UDP_PORT      6000
 #define MAX_TCP_CONN  20
 #define MAX_UDP_RECV  1024
@@ -94,6 +94,7 @@ class ProtocolHandler
     void udp_server_loop_start(void);
     void udp_client_loop_start(void);
 
+    bool tcp_client_ready = false;
     void tcp_msg_json_handle(int type, json &json_obj);
     void init_tcp_server_socket(void);
     void init_tcp_client_socket(void);
@@ -139,7 +140,7 @@ static void sig_handler(int sigio)
         instance.set_thread_exit(true);
         instance.clean_all();
     }
-    sleep(1);
+    usleep(300);
     exit(0);
 }
 
@@ -232,7 +233,8 @@ void ProtocolHandler::tcp_client_run(void)
     send_json[JS_MSG_CONT] = "Get LoRaWAN configuration information.";
     send_string            = send_json.dump();
     int failed_times       = 0;
-    int opr_type;
+    int opr_type           = -1;
+    int opr_ok             = false;
     while (failed_times <= 3 && this->get_thread_exit() == false) {
         send(this->tcp_fd, send_string.c_str(), send_string.length(), 0);
         printf("[%s] send to server: %s\n", __func__, send_string.c_str());
@@ -249,24 +251,24 @@ void ProtocolHandler::tcp_client_run(void)
                 if (opr_type != RETURN_LORAWAN_CFG) {
                     printf("[%s] Error type returned from sever.\n", __func__);
                     ++failed_times;
-                    continue;
                 }
                 int    work_mode   = recv_json[JS_LORAWAN_WORK_MODE];
                 json   config_json = recv_json[JS_MSG_CONT];
                 string conf_string = config_json.dump();
                 printf("[%s] config json is %s .\n", __func__, conf_string.c_str());
-                break;
+                opr_ok = true;
             } catch (const std::exception &e) {
                 printf("[%s]Getting json node failed:[%s].\n", __func__, e.what());
                 ++failed_times;
-                continue;
             }
-
-            printf("[%s] Response from server: %s\n", __func__, buf);
+            if (opr_ok) {
+                break;
+            }
         }
         sleep(2);
     }
-    printf("[%s] thread exit....\n", __func__);
+
+    printf("[%s] threadexit....\n", __func__);
 }
 
 void ProtocolHandler::init_udp_server_socket(void)
@@ -320,7 +322,16 @@ void ProtocolHandler::udp_client_loop_start(void)
     string smsg;
     char   recvbuf[MAX_UDP_RECV] = { 0 };
     int    nlen                  = sizeof(this->udp_addr);
-    while (b_has_got_server_ip == false && this->get_thread_exit() == false) {
+    int    fail_times            = 0;
+    /* 设置阻塞超时 */
+    struct timeval timeOut;
+    timeOut.tv_sec  = 2; //设置2s超时
+    timeOut.tv_usec = 0;
+    if (setsockopt(this->udp_fd, SOL_SOCKET, SO_RCVTIMEO, &timeOut, sizeof(timeOut)) < 0) {
+        printf("[%s] time out setting failed\n", __func__);
+        return;
+    }
+    while (b_has_got_server_ip == false && this->get_thread_exit() == false && fail_times < 3) {
         sleep(1);
         js_send_msg.clear();
         js_recv_msg.clear();
@@ -331,22 +342,12 @@ void ProtocolHandler::udp_client_loop_start(void)
         js_send_msg["from"]          = "client";
         js_send_msg["content"]["ip"] = this->local_ip;
         smsg                         = js_send_msg.dump();
-
         int ret =
             sendto(this->udp_fd, smsg.c_str(), smsg.length(), 0, (sockaddr *)&this->udp_addr, nlen);
         if (ret < 0) {
             printf("[%s] sendto error, ret: %d\n", __func__, ret);
         } else {
             printf("[%s] broadcast ok, msg: %s\n", __func__, smsg.c_str());
-
-            /* 设置阻塞超时 */
-            struct timeval timeOut;
-            timeOut.tv_sec  = 2; //设置2s超时
-            timeOut.tv_usec = 0;
-            if (setsockopt(this->udp_fd, SOL_SOCKET, SO_RCVTIMEO, &timeOut, sizeof(timeOut)) < 0) {
-                printf("[%s] time out setting failed\n", __func__);
-                return;
-            }
 
             //再接收数据
             bzero(recvbuf, MAX_UDP_RECV);
@@ -370,10 +371,10 @@ void ProtocolHandler::udp_client_loop_start(void)
                     // 初始化tcp socket 开启udp 客户端线程
                     this->init_tcp_client_socket();
                     th_tcp_client = thread(tcp_loop_thread);
-                    th_tcp_client.detach();
-
+                    th_tcp_client.join();
                 } catch (const std::exception &e) {
-                    printf("can't not parse json content");
+                    ++fail_times;
+                    printf("[%s]can't not parse json content for [%s]\n", __func__, e.what());
                 }
             } else if (num == -1 && errno == EAGAIN) {
                 printf("[%s] receive timeout\n", __func__);
@@ -584,6 +585,7 @@ void ProtocolHandler::init_tcp_client_socket(void)
     // 请求连接
     connect(
         this->tcp_fd, (struct sockaddr *)&(this->tcp_server_addr), sizeof(this->tcp_server_addr));
+    this->tcp_client_ready = true;
 }
 
 void ProtocolHandler::init_tcp_socket(void)
@@ -690,7 +692,9 @@ void ProtocolHandler::tcp_loop_run(void)
     if (this->to_be_server == true) {
         this->tcp_server_run();
     } else {
-        this->tcp_client_run();
+        if (this->tcp_client_ready) {
+            this->tcp_client_run();
+        }
     }
 }
 
