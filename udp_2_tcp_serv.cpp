@@ -236,7 +236,7 @@ void ProtocolHandler::tcp_client_run(void)
     while (failed_times <= 3 && this->get_thread_exit() == false) {
         send(this->tcp_fd, send_string.c_str(), send_string.length(), 0);
         printf("[%s] send to server: %s\n", __func__, send_string.c_str());
-        int n = recv(this->tcp_fd, buf, MAXLINE * 2, MSG_DONTWAIT);
+        int n = recv(this->tcp_fd, buf, MAXLINE * 2, 0);
         if (n > 0) {
             if (!json::accept(buf)) {
                 printf("[%s]Can't not converse to json.\n", __func__);
