@@ -53,6 +53,7 @@ using json = nlohmann::json;
 static sem_t stop_sem;
 
 void tcp_loop_entry(void);
+void shm_read_entry(void);
 
 double difftimespec(struct timespec end, struct timespec beginning)
 {
@@ -108,7 +109,7 @@ class ProtocolHandler
     void udp_client_loop_start(void);
 
     bool tcp_client_ready = false;
-    void tcp_sever_msg_json_handle(int type, json &json_obj);
+    void tcp_server_msg_json_handle(int type, json &json_obj);
     void init_tcp_server_socket(void);
     void init_tcp_client_socket(void);
 
@@ -273,7 +274,7 @@ void ProtocolHandler::udp_msg_json_handle(int type, json &json_obj)
     }
 }
 
-void ProtocolHandler::tcp_sever_msg_json_handle(int type, json &json_obj)
+void ProtocolHandler::tcp_server_msg_json_handle(int type, json &json_obj)
 {
     json_obj[JS_MSG_FROM] = "tcp_server";
     if (type == GET_LORAWAN_CFG) {
@@ -320,8 +321,7 @@ void ProtocolHandler::tcp_client_run(void)
                         // 服务器端暂时没有Lorawan配置信息
                         sleep(TCP_CLIENT_INTERVAL);
                     }
-                    printf("[%s] Error type[%d] returned from sever.\n", __func__, opr_type);
-                    ++failed_times;
+                    printf("[%s] Error type[%d] returned from sever with content :%s.\n", __func__, opr_type, buf);
                     continue;
                 }
                 int    work_mode   = recv_json[JS_LORAWAN_WORK_MODE];
@@ -337,7 +337,7 @@ void ProtocolHandler::tcp_client_run(void)
         sleep(2);
     }
 
-    printf("[%s] threadexit....\n", __func__);
+    printf("[%s] thread exit....\n", __func__);
 }
 
 void ProtocolHandler::init_udp_server_socket(void)
@@ -554,10 +554,14 @@ void ProtocolHandler::tcp_server_run(void)
     int                num                = 0;
     struct epoll_event events[EPOLLEVENTS];
     this->epoll_fd = epoll_create(FDSIZE);
-
+#ifdef MSG_TEST
     ifstream json_ifstream("test.json");
     json_ifstream >> this->local_json;
     json_ifstream.close();
+#endif
+    // 开启共享内存读取线程
+    thread shm_read_thread(shm_read_entry);
+    shm_read_thread.detach();
 
     printf("[%s] create epoll_fd:%d\n", __func__, this->epoll_fd);
     //添加监听描述符事件
@@ -612,7 +616,7 @@ void ProtocolHandler::tcp_server_run(void)
                     recv_json = json::parse(buf);
                     try {
                         opr_type = recv_json[JS_MSG_TYPE];
-                        this->tcp_sever_msg_json_handle(opr_type, send_json);
+                        this->tcp_server_msg_json_handle(opr_type, send_json);
                         send_string = send_json.dump();
                     } catch (const std::exception &e) {
                         printf(
@@ -707,6 +711,10 @@ void ProtocolHandler::udp_online_check(void)
     string js_string     = js_smsg.dump();
     clock_gettime(CLOCK_MONOTONIC, &send_time);
     recv_time = send_time;
+    if (setsockopt(udp_client_socket, SOL_SOCKET, SO_RCVTIMEO, &timeOut, sizeof(timeOut)) < 0) {
+        printf("[%s] time out setting failed\n", __func__);
+        return;
+    }
     while ((int)difftimespec(recv_time, send_time) < UDP_TIME_OUT &&
            this->get_thread_exit() == false) {
         ret = sendto(udp_client_socket,
@@ -721,10 +729,6 @@ void ProtocolHandler::udp_online_check(void)
             printf("[%s] broadcast ok, msg: %s\n", __func__, js_string.c_str());
         }
 
-        if (setsockopt(udp_client_socket, SOL_SOCKET, SO_RCVTIMEO, &timeOut, sizeof(timeOut)) < 0) {
-            printf("[%s] time out setting failed\n", __func__);
-            return;
-        }
         ret = recvfrom(udp_client_socket,
                        rev_msg,
                        MAX_RECV_SIZE,
@@ -816,11 +820,9 @@ int main(void)
     thread udp_find_thread(udp_check_onlie);
     udp_find_thread.join();
 
-    thread shm_read_thread(shm_read_entry);
     thread udp_work_thread(udp_loop_entry);
     thread tcp_work_thread(tcp_loop_entry);
 
-    shm_read_thread.detach();
     udp_work_thread.detach();
     tcp_work_thread.detach();
 
