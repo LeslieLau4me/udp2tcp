@@ -21,15 +21,17 @@
     })
 #define SAFE_ATOMIC_SET(ptr, value) ((void)__sync_lock_test_and_set((ptr), (value)))
 
-#define TCP_PORT      19999
-#define MAXLINE       1024
-#define MAX_RECV_SIZE 1024
-#define EPOLLEVENTS   100
-#define FDSIZE        20
-#define UDP_TIME_OUT  1
-#define UDP_PORT      6000
-#define MAX_TCP_CONN  20
-#define MAX_UDP_RECV  1024
+#define TCP_PORT            19999
+#define MAXLINE             1024
+#define MAX_RECV_SIZE       1024
+#define EPOLLEVENTS         100
+#define FDSIZE              20
+#define UDP_TIME_OUT        1
+#define UDP_PORT            6000
+#define MAX_TCP_CONN        20
+#define MAX_UDP_RECV        1024
+#define EPOLL_TIME_OUT      10 * 60 * 1000
+#define EPOLL_BLOCK_FOREVER -1
 
 // TCP服务器没有配置信息时客户端的等待间隔
 #define TCP_CLIENT_INTERVAL 3
@@ -49,6 +51,7 @@ using json = nlohmann::json;
 
 #define JS_LORAWAN_WORK_MODE "work_mode"
 #define JS_LORAWAN_CONFIG    "config"
+#define LORAWAN_START        "cgicpp-workmode-set"
 
 static sem_t stop_sem;
 
@@ -86,7 +89,6 @@ class ProtocolHandler
 {
   private:
     /* data */
-    string cmd;
     string local_ip;
     string tcp_server_ip;
     int    tcp_fd       = -1;
@@ -121,9 +123,9 @@ class ProtocolHandler
 
     // tcp client to do
 
-    void lorawan_config_start(void);
-    void lorawan_check_online(void);
-    void lorawan_start(void);
+    int lorawan_config_start(json &config_json);
+    // void lorawan_check_online(void);
+    int lorawan_start(void);
 
     json local_json;
 
@@ -236,6 +238,36 @@ void ProtocolHandler ::clean_all(void)
     close(this->udp_fd);
 }
 
+int ProtocolHandler::lorawan_start(void)
+{
+    json             start_json;
+    map<int, string> workmode_m = { { PKFD, "PKFD" }, { BRDGE, "BRDGE" }, { BAST, "BAST" } };
+    if (workmode_m.count(this->work_mode)) {
+        start_json["workmode"] = workmode_m[this->work_mode];
+        string json_string     = start_json.dump();
+        string cmd             = LORAWAN_START + string(" ") + json_string + string(" &");
+        system(cmd.c_str());
+        return 0;
+    }
+    return -1;
+}
+
+int ProtocolHandler::lorawan_config_start(json &config_json)
+{
+    string cmd;
+    try {
+        string get_cmd     = config_json["cmd"];
+        string json_string = config_json.dump();
+        // printf("[%s] config json is %s .\n", __func__, json_string.c_str());
+        cmd = get_cmd + string(" ") + json_string;
+    } catch (const std::exception &e) {
+        printf("[%s] Faied to parse cmd.\n", __func__);
+        return -1;
+    }
+    system(cmd.c_str());
+    return 0;
+}
+
 //获取本机ip(根据实际情况修改ETH_NAME)
 void ProtocolHandler ::get_local_ip_string(void)
 {
@@ -321,13 +353,21 @@ void ProtocolHandler::tcp_client_run(void)
                         // 服务器端暂时没有Lorawan配置信息
                         sleep(TCP_CLIENT_INTERVAL);
                     }
-                    printf("[%s] Error type[%d] returned from sever with content :%s.\n", __func__, opr_type, buf);
+                    printf("[%s] Error type[%d] returned from sever with content :%s.\n",
+                           __func__,
+                           opr_type,
+                           buf);
                     continue;
                 }
-                int    work_mode   = recv_json[JS_LORAWAN_WORK_MODE];
-                json   config_json = recv_json[JS_MSG_CONT];
-                string conf_string = config_json.dump();
-                printf("[%s] config json is %s .\n", __func__, conf_string.c_str());
+                this->work_mode  = recv_json[JS_LORAWAN_WORK_MODE];
+                json config_json = recv_json[JS_MSG_CONT];
+                if (this->lorawan_config_start(config_json) != 0) {
+                    ++failed_times;
+                    continue;
+                }
+                if (this->lorawan_start() != 0) {
+                    printf("[%s]ERROR:LoRaWAN start failed ...\n", __func__);
+                }
                 break;
             } catch (const std::exception &e) {
                 printf("[%s]Getting json node failed:[%s].\n", __func__, e.what());
@@ -569,7 +609,13 @@ void ProtocolHandler::tcp_server_run(void)
     while (this->get_thread_exit() != true) {
         // 获取已经准备好的描述符事件
         printf("[%s] epoll_fd:%d epoll_wait...\n", __func__, epoll_fd);
-        num = epoll_wait(this->epoll_fd, events, EPOLLEVENTS, -1);
+        // -1设置为永远堵塞
+        num = epoll_wait(this->epoll_fd, events, EPOLLEVENTS, EPOLL_TIME_OUT);
+        printf("epoll num is %d \n", num);
+        if (num <= 0) {
+            printf("[%s]Warn:epoll timeout.\n", __func__);
+            break;
+        }
         for (i = 0; i < num; i++) {
             int fd = events[i].data.fd;
             // tcp_fd说明有新的客户端请求连接
@@ -632,6 +678,7 @@ void ProtocolHandler::tcp_server_run(void)
         }
     }
     printf("[%s] thread exit.....\n", __func__);
+    sem_post(&stop_sem);
 }
 
 void ProtocolHandler::init_tcp_server_socket(void)
